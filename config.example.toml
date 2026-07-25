@@ -1,0 +1,8 @@
+# openwebui-chat configuration file
+# Place at ~/.config/openwebui-chat/config.toml or ./openwebui-chat.toml
+# Environment variables and CLI flags take precedence over this file.
+
+base_url = "http://localhost:8080"
+api_key = "sk-your-api-key-here"
+default_model = ""
+timeout = 3300
