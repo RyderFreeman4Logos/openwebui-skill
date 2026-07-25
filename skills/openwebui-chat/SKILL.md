@@ -5,8 +5,9 @@ Use when the agent needs to chat with a model hosted on Open WebUI, creating a p
 ## Prerequisites
 
 - `openwebui-chat` binary installed and on PATH
-- Environment configured: `OPENWEBUI_BASE_URL`, `OPENWEBUI_API_KEY`, `OPENWEBUI_DEFAULT_MODEL`
-- Optional: `~/.config/openwebui-chat/config.toml` for persistent settings
+- Run `openwebui-chat config init` to interactively prompt for the Open WebUI base URL, API key, and default model. It writes `$XDG_CONFIG_HOME/openwebui-chat/config.toml` (normally `~/.config/openwebui-chat/config.toml`).
+- Environment variables `OPENWEBUI_BASE_URL`, `OPENWEBUI_API_KEY`, and `OPENWEBUI_DEFAULT_MODEL` can override the persistent configuration when needed.
+- Install this skill separately with `npx skills add RyderFreeman4Logos/openwebui-skill`; the CLI installer does not install it.
 
 ## Workflow
 

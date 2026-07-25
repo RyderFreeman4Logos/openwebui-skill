@@ -1,4 +1,3 @@
-
 use anyhow::{anyhow, Context, Result};
 use serde::{Deserialize, Serialize};
 
@@ -49,6 +48,46 @@ struct TomlConfig {
 }
 
 impl Config {
+    /// Return the XDG config file path.
+    pub fn config_path() -> Result<std::path::PathBuf> {
+        let config_dir = dirs::config_dir()
+            .ok_or_else(|| anyhow!("Could not determine config directory"))?
+            .join("openwebui-chat");
+        Ok(config_dir.join("config.toml"))
+    }
+
+    /// Write the current config to the XDG config file.
+    pub fn save_to_xdg(&self) -> Result<()> {
+        let path = Self::config_path()?;
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent).with_context(|| {
+                format!("Failed to create config directory: {}", parent.display())
+            })?;
+        }
+        let toml_string =
+            toml::to_string_pretty(self).context("Failed to serialize config to TOML")?;
+        std::fs::write(&path, toml_string)
+            .with_context(|| format!("Failed to write config file: {}", path.display()))?;
+        Ok(())
+    }
+
+    /// Load only the XDG config file without applying CLI, environment, or local-file overrides.
+    pub(crate) fn load_xdg() -> Result<Option<Self>> {
+        let path = Self::config_path()?;
+        if !path.exists() {
+            return Ok(None);
+        }
+
+        let config = Self::read_toml_config(&path)?;
+        Ok(Some(Self {
+            base_url: config.base_url.unwrap_or_default(),
+            api_key: config.api_key.unwrap_or_default(),
+            default_model: config.default_model.unwrap_or_default(),
+            timeout: config.timeout.unwrap_or(DEFAULT_TIMEOUT),
+            poll_interval: config.poll_interval.unwrap_or(DEFAULT_POLL_INTERVAL),
+        }))
+    }
+
     /// Load configuration with CLI override priority.
     ///
     /// Priority (highest first):
@@ -127,21 +166,24 @@ impl Config {
     fn load_toml() -> Result<Option<TomlConfig>> {
         // Try user config dir first, then local directory
         let candidates = [
-            dirs::config_dir().map(|d| d.join("openwebui-chat").join("config.toml")),
+            Self::config_path().ok(),
             Some(std::path::PathBuf::from("openwebui-chat.toml")),
         ];
 
         for candidate in candidates.iter().flatten() {
             if candidate.exists() {
-                let content = std::fs::read_to_string(candidate)
-                    .with_context(|| format!("Failed to read config file: {}", candidate.display()))?;
-                let cfg: TomlConfig = toml::from_str(&content)
-                    .with_context(|| format!("Failed to parse config file: {}", candidate.display()))?;
-                return Ok(Some(cfg));
+                return Self::read_toml_config(candidate).map(Some);
             }
         }
 
         Ok(None)
+    }
+
+    fn read_toml_config(path: &std::path::Path) -> Result<TomlConfig> {
+        let content = std::fs::read_to_string(path)
+            .with_context(|| format!("Failed to read config file: {}", path.display()))?;
+        toml::from_str(&content)
+            .with_context(|| format!("Failed to parse config file: {}", path.display()))
     }
 
     pub fn http_client(&self) -> Result<reqwest::Client> {
@@ -162,5 +204,93 @@ impl Config {
             "/api/v1/chats/{id}",
         ]
     }
+}
 
+#[cfg(test)]
+mod tests {
+    use super::Config;
+    use std::sync::Mutex;
+
+    static XDG_CONFIG_HOME_LOCK: Mutex<()> = Mutex::new(());
+
+    #[test]
+    fn save_to_xdg_writes_config_toml_to_the_xdg_directory() -> anyhow::Result<()> {
+        let _lock = XDG_CONFIG_HOME_LOCK.lock().unwrap();
+        let temp_dir =
+            std::env::temp_dir().join(format!("openwebui-chat-test-{}", uuid::Uuid::new_v4()));
+        let previous_xdg_config_home = std::env::var_os("XDG_CONFIG_HOME");
+        std::env::set_var("XDG_CONFIG_HOME", &temp_dir);
+
+        let config = Config {
+            base_url: "http://example.test:8080".to_string(),
+            api_key: "test-api-key".to_string(),
+            default_model: "test-model".to_string(),
+            timeout: 45,
+            poll_interval: 2,
+        };
+
+        let result = (|| -> anyhow::Result<()> {
+            config.save_to_xdg()?;
+
+            let path = temp_dir.join("openwebui-chat").join("config.toml");
+            let saved: toml::Value = toml::from_str(&std::fs::read_to_string(path)?)?;
+            assert_eq!(saved["base_url"].as_str(), Some("http://example.test:8080"));
+            assert_eq!(saved["api_key"].as_str(), Some("test-api-key"));
+            assert_eq!(saved["default_model"].as_str(), Some("test-model"));
+            assert_eq!(saved["timeout"].as_integer(), Some(45));
+            assert_eq!(saved["poll_interval"].as_integer(), Some(2));
+            Ok(())
+        })();
+
+        match previous_xdg_config_home {
+            Some(path) => std::env::set_var("XDG_CONFIG_HOME", path),
+            None => std::env::remove_var("XDG_CONFIG_HOME"),
+        }
+        let _ = std::fs::remove_dir_all(&temp_dir);
+
+        result
+    }
+
+    #[test]
+    fn load_xdg_uses_saved_values_without_environment_overrides() -> anyhow::Result<()> {
+        let _lock = XDG_CONFIG_HOME_LOCK.lock().unwrap();
+        let temp_dir =
+            std::env::temp_dir().join(format!("openwebui-chat-test-{}", uuid::Uuid::new_v4()));
+        let previous_xdg_config_home = std::env::var_os("XDG_CONFIG_HOME");
+        let previous_base_url = std::env::var_os("OPENWEBUI_BASE_URL");
+        std::env::set_var("XDG_CONFIG_HOME", &temp_dir);
+
+        let config = Config {
+            base_url: "http://saved.example.test:8080".to_string(),
+            api_key: "saved-api-key".to_string(),
+            default_model: "saved-model".to_string(),
+            timeout: 45,
+            poll_interval: 2,
+        };
+
+        let result = (|| -> anyhow::Result<()> {
+            config.save_to_xdg()?;
+            std::env::set_var("OPENWEBUI_BASE_URL", "http://environment.example.test:8080");
+
+            let loaded = Config::load_xdg()?.expect("config should have been saved");
+            assert_eq!(loaded.base_url, config.base_url);
+            assert_eq!(loaded.api_key, config.api_key);
+            assert_eq!(loaded.default_model, config.default_model);
+            assert_eq!(loaded.timeout, config.timeout);
+            assert_eq!(loaded.poll_interval, config.poll_interval);
+            Ok(())
+        })();
+
+        match previous_xdg_config_home {
+            Some(path) => std::env::set_var("XDG_CONFIG_HOME", path),
+            None => std::env::remove_var("XDG_CONFIG_HOME"),
+        }
+        match previous_base_url {
+            Some(value) => std::env::set_var("OPENWEBUI_BASE_URL", value),
+            None => std::env::remove_var("OPENWEBUI_BASE_URL"),
+        }
+        let _ = std::fs::remove_dir_all(&temp_dir);
+
+        result
+    }
 }

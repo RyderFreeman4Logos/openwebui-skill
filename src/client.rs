@@ -77,9 +77,9 @@ impl OpenWebUIClient {
 
         match auth_resp.status() {
             s if s.is_success() => Ok(version),
-            s if s.as_u16() == 401 => Err(anyhow!(
-                "API key is invalid or not recognized (HTTP 401)"
-            )),
+            s if s.as_u16() == 401 => {
+                Err(anyhow!("API key is invalid or not recognized (HTTP 401)"))
+            }
             s if s.as_u16() == 403 => Err(anyhow!(
                 "API key lacks permission for this endpoint (HTTP 403).\n\
                  If endpoint restrictions are enabled, add these paths to\n\
@@ -107,7 +107,10 @@ impl OpenWebUIClient {
             return Err(anyhow!("Failed to list models (HTTP {}): {}", status, body));
         }
 
-        let body: Value = resp.json().await.context("Failed to parse models response")?;
+        let body: Value = resp
+            .json()
+            .await
+            .context("Failed to parse models response")?;
 
         // /api/models may return {"data": [...]} or a bare array of objects.
         let models: Vec<String> = body
@@ -296,7 +299,11 @@ impl OpenWebUIClient {
     }
 
     /// Fetch a specific message from a chat and check if it's done.
-    async fn fetch_message(&self, chat_id: &str, message_id: &str) -> Result<Option<(String, bool)>> {
+    async fn fetch_message(
+        &self,
+        chat_id: &str,
+        message_id: &str,
+    ) -> Result<Option<(String, bool)>> {
         let url = format!("{}/api/v1/chats/{}", self.base_url, chat_id);
         let resp = self
             .client
@@ -358,10 +365,7 @@ impl OpenWebUIClient {
                             })
                             .unwrap_or_default()
                     });
-                let done = msg
-                    .get("done")
-                    .and_then(|d| d.as_bool())
-                    .unwrap_or(false);
+                let done = msg.get("done").and_then(|d| d.as_bool()).unwrap_or(false);
                 Ok(Some((content, done)))
             }
             None => Ok(None),
@@ -370,6 +374,5 @@ impl OpenWebUIClient {
 }
 
 fn config_required_endpoints() -> String {
-    crate::config::Config::required_endpoints()
-        .join("\n  ")
+    crate::config::Config::required_endpoints().join("\n  ")
 }

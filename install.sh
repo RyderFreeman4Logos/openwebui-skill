@@ -1,84 +1,65 @@
-#!/bin/bash
-# openwebui-chat installer
-# Installs the binary and Hermes skill without root.
+#!/usr/bin/env bash
+# Downloadable installer for openwebui-chat. Run with:
+# curl -fsSL https://raw.githubusercontent.com/RyderFreeman4Logos/openwebui-skill/main/install.sh | bash
 
 set -euo pipefail
 
-SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-BINARY_NAME="openwebui-chat"
-INSTALL_DIR="${HOME}/.local/bin"
-SKILL_DIR="${HOME}/.hermes/skills/openwebui-chat"
+REPOSITORY_URL="https://github.com/RyderFreeman4Logos/openwebui-skill"
+MISE_BIN="${HOME}/.local/bin/mise"
 
 echo "openwebui-chat installer"
 echo "========================"
 
-# 1. Build the binary
-echo ""
-echo "[1/4] Building release binary..."
-cd "$SCRIPT_DIR"
-if command -v cargo &>/dev/null; then
-    cargo build --release
-elif command -v rustc &>/dev/null; then
-    echo "Warning: cargo not found, using rustc directly"
-    rustc --edition 2021 -O src/main.rs -o "target/release/${BINARY_NAME}"
-else
-    echo "Error: Neither cargo nor rustc found. Install Rust from https://rustup.rs"
+echo
+echo "[1/5] Checking for mise..."
+if ! command -v mise >/dev/null 2>&1 && [[ -x "${MISE_BIN}" ]]; then
+    export PATH="${HOME}/.local/bin:${PATH}"
+fi
+
+if ! command -v mise >/dev/null 2>&1; then
+    echo "mise is not installed; installing it without root..."
+    curl https://mise.run | sh
+    export PATH="${HOME}/.local/bin:${PATH}"
+fi
+
+if ! command -v mise >/dev/null 2>&1; then
+    echo "Error: mise was not found after installation." >&2
     exit 1
 fi
 
-BINARY_PATH="target/release/${BINARY_NAME}"
-if [[ ! -f "$BINARY_PATH" ]]; then
-    echo "Error: Binary not found at ${BINARY_PATH}"
+# mise's activation script updates PATH and its shims for this non-login shell.
+eval "$(mise activate bash)"
+CARGO_HOME="${HOME}/.cargo"
+export CARGO_HOME
+CARGO_BIN_DIR="${CARGO_HOME}/bin"
+
+echo
+echo "[2/5] Installing openwebui-chat with Rust managed by mise..."
+mise install rust@stable
+mise exec rust@stable -- cargo install --git "${REPOSITORY_URL}"
+export PATH="${CARGO_BIN_DIR}:${PATH}"
+
+if ! command -v openwebui-chat >/dev/null 2>&1; then
+    echo "Error: openwebui-chat was not found after cargo install." >&2
+    echo "Expected it at ${CARGO_BIN_DIR}/openwebui-chat" >&2
     exit 1
 fi
 
-# 2. Install binary
-echo ""
-echo "[2/4] Installing binary to ${INSTALL_DIR}/"
-mkdir -p "$INSTALL_DIR"
-cp "$BINARY_PATH" "${INSTALL_DIR}/${BINARY_NAME}"
-chmod +x "${INSTALL_DIR}/${BINARY_NAME}"
-
-# Check PATH
-if [[ ":${PATH}:" != *":${INSTALL_DIR}:"* ]]; then
-    echo ""
-    echo "  Warning: ${INSTALL_DIR} is not in your PATH."
-    echo "  Add this to your shell profile:"
-    echo "    export PATH=\"${INSTALL_DIR}:\$PATH\""
+echo
+echo "[3/5] Initializing interactive XDG configuration..."
+if ! exec 3</dev/tty 2>/dev/null; then
+    echo "Error: configuration requires an interactive terminal (/dev/tty)." >&2
+    exit 1
 fi
+openwebui-chat config init <&3
+exec 3<&-
 
-# 3. Install Hermes skill
-echo ""
-echo "[3/4] Installing Hermes skill to ${SKILL_DIR}/"
-if [[ -d "${HOME}/.hermes" ]]; then
-    mkdir -p "$SKILL_DIR"
-    if [[ -d "${SCRIPT_DIR}/skills/openwebui-chat" ]]; then
-        cp -r "${SCRIPT_DIR}/skills/openwebui-chat/"* "$SKILL_DIR/"
-    else
-        echo "  (skill files not found, skipping skill installation)"
-    fi
-else
-    echo "  (~/.hermes not found, skipping skill installation)"
-fi
+echo
+echo "[4/5] Running diagnostics..."
+openwebui-chat doctor
 
-# 4. Print required environment variables
-echo ""
-echo "[4/4] Environment setup"
-echo "  Set these environment variables (or use ~/.config/openwebui-chat/config.toml):"
-echo ""
-echo "    export OPENWEBUI_BASE_URL=http://your-openwebui:8080"
-echo "    export OPENWEBUI_API_KEY=sk-your-api-key"
-echo "    export OPENWEBUI_DEFAULT_MODEL=your-model"
-echo ""
-echo "  Copy .env.example for reference."
-
-# 5. Non-destructive diagnostic
-echo ""
-echo "Running diagnostic..."
-if [[ -f "${INSTALL_DIR}/${BINARY_NAME}" ]]; then
-    "${INSTALL_DIR}/${BINARY_NAME}" doctor || true
-fi
-
-echo ""
-echo "Installation complete."
-echo "Run '${BINARY_NAME} --help' for usage."
+echo
+echo "[5/5] Optional: install the agent skill separately"
+echo "  npx skills add RyderFreeman4Logos/openwebui-skill"
+echo
+echo "Installation complete. Run 'openwebui-chat --help' for usage."

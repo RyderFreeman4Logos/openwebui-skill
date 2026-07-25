@@ -14,11 +14,21 @@ When an agent uses `openwebui-chat`, the conversation is stored as a native Open
 ## Quick start
 
 ```bash
-# Set up your environment
-export OPENWEBUI_BASE_URL=http://your-openwebui:8080
-export OPENWEBUI_API_KEY=sk-your-key
-export OPENWEBUI_DEFAULT_MODEL=your-model-name
+# Install the CLI (installs mise first when needed)
+curl -fsSL https://raw.githubusercontent.com/RyderFreeman4Logos/openwebui-skill/main/install.sh | bash
+```
 
+Run the installer from an interactive terminal. It uses mise to install Rust, installs `openwebui-chat` from this repository, then interactively runs `openwebui-chat config init`. That writes persistent configuration to `$XDG_CONFIG_HOME/openwebui-chat/config.toml` (normally `~/.config/openwebui-chat/config.toml`) and runs `openwebui-chat doctor` to verify connectivity.
+
+Install the agent skill separately—the CLI installer does not install it:
+
+```bash
+npx skills add RyderFreeman4Logos/openwebui-skill
+```
+
+After the installer finishes, start a chat:
+
+```bash
 # Start a new chat — returns immediately after submission
 openwebui-chat start \
   --title "Hermes to local model" \
@@ -117,6 +127,14 @@ openwebui-chat doctor
 openwebui-chat models
 ```
 
+### `config init` — Create persistent configuration
+
+Prompts for the Open WebUI base URL, API key, and default model, then writes the XDG config file and runs diagnostics. Existing values are shown as defaults, with the API key masked.
+
+```bash
+openwebui-chat config init
+```
+
 ## Configuration
 
 Configuration is resolved in priority order (highest first):
@@ -136,7 +154,7 @@ default_model = "llama3"
 timeout = 3300
 ```
 
-## Building from source
+## Development build (optional)
 
 ```bash
 cargo build --release

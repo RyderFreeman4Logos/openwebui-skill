@@ -2,11 +2,10 @@ mod client;
 mod config;
 mod notify;
 
-use std::process::ExitCode;
+use std::{io::Write, process::ExitCode};
 
-use anyhow::Result;
+use anyhow::{Context, Result};
 use clap::{Parser, Subcommand};
-
 
 #[derive(Parser)]
 #[command(
@@ -83,6 +82,17 @@ enum Command {
     },
     /// List available models
     Models,
+    /// Initialize or update configuration interactively
+    Config {
+        #[command(subcommand)]
+        command: ConfigCommand,
+    },
+}
+
+#[derive(Subcommand)]
+enum ConfigCommand {
+    /// Set up configuration interactively
+    Init,
 }
 
 #[tokio::main]
@@ -104,6 +114,16 @@ async fn main() -> ExitCode {
 }
 
 async fn run(cli: Cli) -> Result<()> {
+    // `config init` is the bootstrap path, so it must not require an existing config.
+    if matches!(
+        &cli.command,
+        Command::Config {
+            command: ConfigCommand::Init
+        }
+    ) {
+        return run_config_init().await;
+    }
+
     // Handle doctor --print-required-endpoints without needing a config
     if let Command::Doctor {
         print_required_endpoints: true,
@@ -131,7 +151,8 @@ async fn run(cli: Cli) -> Result<()> {
     )?;
 
     let http_client = cfg.http_client()?;
-    let client = client::OpenWebUIClient::new(http_client, cfg.base_url.clone(), cfg.api_key.clone());
+    let client =
+        client::OpenWebUIClient::new(http_client, cfg.base_url.clone(), cfg.api_key.clone());
 
     match cli.command {
         Command::Start { message, title } => {
@@ -185,9 +206,98 @@ async fn run(cli: Cli) -> Result<()> {
                 }
             }
         }
+        Command::Config {
+            command: ConfigCommand::Init,
+        } => unreachable!("handled before configuration is loaded"),
     }
 
     Ok(())
+}
+
+async fn run_config_init() -> Result<()> {
+    let existing = config::Config::load_xdg()?.unwrap_or_default();
+    let base_url_default = if existing.base_url.is_empty() {
+        "http://localhost:8080".to_string()
+    } else {
+        existing.base_url.clone()
+    };
+
+    println!("openwebui-chat configuration setup");
+    println!("===================================");
+    println!();
+
+    let base_url = prompt_for_value(
+        "Open WebUI base URL",
+        &base_url_default,
+        Some(base_url_default.clone()),
+    )?;
+    let api_key = prompt_for_value(
+        "API key",
+        &existing.api_key,
+        (!existing.api_key.is_empty()).then(|| mask_api_key(&existing.api_key)),
+    )?;
+    let default_model = prompt_for_value(
+        "Default model (leave empty to skip)",
+        &existing.default_model,
+        (!existing.default_model.is_empty()).then(|| existing.default_model.clone()),
+    )?;
+
+    let config = config::Config {
+        base_url,
+        api_key,
+        default_model,
+        timeout: existing.timeout,
+        poll_interval: existing.poll_interval,
+    };
+    let path = config::Config::config_path()?;
+    config.save_to_xdg()?;
+
+    println!();
+    println!("Configuration saved to: {}", path.display());
+    println!();
+    println!("Running diagnostics...");
+
+    let http_client = config.http_client()?;
+    let client =
+        client::OpenWebUIClient::new(http_client, config.base_url.clone(), config.api_key.clone());
+    run_doctor(&client, &config).await
+}
+
+fn prompt_for_value(
+    label: &str,
+    current_value: &str,
+    displayed_current_value: Option<String>,
+) -> Result<String> {
+    match displayed_current_value {
+        Some(value) => print!("{} [{}]: ", label, value),
+        None => print!("{}: ", label),
+    }
+    std::io::stdout()
+        .flush()
+        .context("Failed to flush configuration prompt")?;
+
+    let mut input = String::new();
+    std::io::stdin()
+        .read_line(&mut input)
+        .context("Failed to read configuration input")?;
+    let input = input.trim();
+
+    Ok(if input.is_empty() {
+        current_value.to_string()
+    } else {
+        input.to_string()
+    })
+}
+
+fn mask_api_key(api_key: &str) -> String {
+    let characters: Vec<char> = api_key.chars().collect();
+    if characters.len() <= 7 {
+        return "*".repeat(characters.len());
+    }
+
+    let prefix: String = characters[..3].iter().collect();
+    let suffix: String = characters[characters.len() - 4..].iter().collect();
+    format!("{}...{}", prefix, suffix)
 }
 
 fn resolve_model(default_model: &str) -> Result<String> {
@@ -201,17 +311,21 @@ fn resolve_model(default_model: &str) -> Result<String> {
     }
 }
 
-async fn run_doctor(
-    client: &client::OpenWebUIClient,
-    cfg: &config::Config,
-) -> Result<()> {
+async fn run_doctor(client: &client::OpenWebUIClient, cfg: &config::Config) -> Result<()> {
     println!("openwebui-chat diagnostics");
     println!("==========================");
     println!();
     println!("Configuration:");
     println!("  base_url:       {}", cfg.base_url);
-    println!("  api_key:        {}...{}", &cfg.api_key[..3.min(cfg.api_key.len())], &cfg.api_key[cfg.api_key.len().saturating_sub(4)..]);
-    println!("  default_model:  {}", if cfg.default_model.is_empty() { "(none)" } else { &cfg.default_model });
+    println!("  api_key:        {}", mask_api_key(&cfg.api_key));
+    println!(
+        "  default_model:  {}",
+        if cfg.default_model.is_empty() {
+            "(none)"
+        } else {
+            &cfg.default_model
+        }
+    );
     println!("  timeout:        {}s", cfg.timeout);
     println!("  poll_interval:  {}s", cfg.poll_interval);
     println!();
@@ -264,4 +378,15 @@ async fn run_doctor(
     println!();
     println!("All checks complete.");
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::Cli;
+    use clap::Parser;
+
+    #[test]
+    fn config_init_is_a_valid_command() {
+        assert!(Cli::try_parse_from(["openwebui-chat", "config", "init"]).is_ok());
+    }
 }
