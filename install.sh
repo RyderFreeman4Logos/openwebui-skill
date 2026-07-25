@@ -27,21 +27,14 @@ if ! command -v mise >/dev/null 2>&1; then
     exit 1
 fi
 
-# mise's activation script updates PATH and its shims for this non-login shell.
-eval "$(mise activate bash)"
-CARGO_HOME="${HOME}/.cargo"
-export CARGO_HOME
-CARGO_BIN_DIR="${CARGO_HOME}/bin"
-
 echo
-echo "[2/5] Installing openwebui-chat with Rust managed by mise..."
-mise install rust@stable
-mise exec rust@stable -- cargo install --git "${REPOSITORY_URL}"
-export PATH="${CARGO_BIN_DIR}:${PATH}"
+echo "[2/5] Installing openwebui-chat via mise cargo backend..."
+mise use -g rust@stable
+mise use -g "cargo:openwebui-chat@git+${REPOSITORY_URL}"
 
 if ! command -v openwebui-chat >/dev/null 2>&1; then
-    echo "Error: openwebui-chat was not found after cargo install." >&2
-    echo "Expected it at ${CARGO_BIN_DIR}/openwebui-chat" >&2
+    echo "Error: openwebui-chat was not found after mise install." >&2
+    echo "Try running 'mise activate bash' or check mise shims." >&2
     exit 1
 fi
 
@@ -63,3 +56,4 @@ echo "[5/5] Optional: install the agent skill separately"
 echo "  npx skills add RyderFreeman4Logos/openwebui-skill"
 echo
 echo "Installation complete. Run 'openwebui-chat --help' for usage."
+echo "To update later: mise upgrade cargo:openwebui-chat"
