@@ -74,6 +74,12 @@ enum Command {
         #[arg(long)]
         notify: Option<String>,
     },
+    /// Delete a chat session
+    DeleteSession {
+        /// Chat ID to delete
+        #[arg(long)]
+        chat_id: String,
+    },
     /// Check connectivity and diagnose configuration
     Doctor {
         /// Print the required API endpoints for endpoint restrictions
@@ -186,6 +192,16 @@ async fn run(cli: Cli) -> Result<()> {
                 )
                 .await?;
             println!("{}", serde_json::to_string_pretty(&result)?);
+        }
+        Command::DeleteSession { chat_id } => {
+            let deleted = client.delete_chat(&chat_id).await?;
+            println!(
+                "{}",
+                serde_json::to_string_pretty(&serde_json::json!({
+                    "deleted": deleted,
+                    "chat_id": chat_id,
+                }))?
+            );
         }
         Command::Doctor {
             print_required_endpoints: false,
@@ -388,5 +404,13 @@ mod tests {
     #[test]
     fn config_init_is_a_valid_command() {
         assert!(Cli::try_parse_from(["openwebui-chat", "config", "init"]).is_ok());
+    }
+
+    #[test]
+    fn delete_session_is_a_valid_command() {
+        assert!(Cli::try_parse_from(
+            ["openwebui-chat", "delete-session", "--chat-id", "chat-123",]
+        )
+        .is_ok());
     }
 }

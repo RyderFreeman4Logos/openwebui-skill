@@ -132,6 +132,31 @@ impl OpenWebUIClient {
         Ok(models)
     }
 
+    /// Delete a persistent chat session.
+    pub async fn delete_chat(&self, chat_id: &str) -> Result<bool> {
+        let url = format!("{}/api/v1/chats/{}", self.base_url, chat_id);
+        let resp = self
+            .client
+            .delete(&url)
+            .bearer_auth(&self.api_key)
+            .send()
+            .await
+            .context("Failed to delete chat")?;
+
+        if resp.status() == reqwest::StatusCode::NOT_FOUND {
+            return Ok(false);
+        }
+        if !resp.status().is_success() {
+            return Err(anyhow!("HTTP {}", resp.status()));
+        }
+
+        let body: Value = resp
+            .json()
+            .await
+            .context("Failed to parse delete response")?;
+        Ok(body.as_bool().unwrap_or(false))
+    }
+
     /// Submit a chat completion request to Open WebUI.
     ///
     /// For a **new chat**: pass `chat_id=None`. The server will create a new
@@ -375,4 +400,74 @@ impl OpenWebUIClient {
 
 fn config_required_endpoints() -> String {
     crate::config::Config::required_endpoints().join("\n  ")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::OpenWebUIClient;
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+    async fn serve_once(response: &'static str) -> (String, tokio::task::JoinHandle<String>) {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("test listener should bind");
+        let address = listener
+            .local_addr()
+            .expect("test listener should have an address");
+        let server = tokio::spawn(async move {
+            let (mut stream, _) = listener.accept().await.expect("test server should accept");
+            let mut request = Vec::new();
+            let mut chunk = [0_u8; 1024];
+            loop {
+                let read = stream
+                    .read(&mut chunk)
+                    .await
+                    .expect("test server should read request");
+                assert_ne!(read, 0, "client closed connection before sending a request");
+                request.extend_from_slice(&chunk[..read]);
+                if request.windows(4).any(|window| window == b"\r\n\r\n") {
+                    break;
+                }
+            }
+            stream
+                .write_all(response.as_bytes())
+                .await
+                .expect("test server should write response");
+            String::from_utf8(request).expect("request should be UTF-8")
+        });
+
+        (format!("http://{address}"), server)
+    }
+
+    #[tokio::test]
+    async fn delete_chat_sends_authenticated_delete_and_returns_response_boolean() {
+        let (base_url, server) = serve_once(
+            "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: 4\r\nConnection: close\r\n\r\ntrue",
+        )
+        .await;
+        let client = OpenWebUIClient::new(reqwest::Client::new(), base_url, "api-key".to_string());
+
+        assert!(client
+            .delete_chat("chat-123")
+            .await
+            .expect("delete response should succeed"));
+
+        let request = server.await.expect("test server should complete");
+        assert!(request.starts_with("DELETE /api/v1/chats/chat-123 HTTP/1.1\r\n"));
+        assert!(request.contains("authorization: Bearer api-key\r\n"));
+    }
+
+    #[tokio::test]
+    async fn delete_chat_returns_false_when_chat_is_not_found() {
+        let (base_url, server) =
+            serve_once("HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\nConnection: close\r\n\r\n")
+                .await;
+        let client = OpenWebUIClient::new(reqwest::Client::new(), base_url, "api-key".to_string());
+
+        assert!(!client
+            .delete_chat("missing-chat")
+            .await
+            .expect("404 should map to false"));
+        server.await.expect("test server should complete");
+    }
 }

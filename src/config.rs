@@ -164,15 +164,31 @@ impl Config {
     }
 
     fn load_toml() -> Result<Option<TomlConfig>> {
-        // Try user config dir first, then local directory
-        let candidates = [
-            Self::config_path().ok(),
-            Some(std::path::PathBuf::from("openwebui-chat.toml")),
-        ];
+        let mut candidates = Vec::new();
 
-        for candidate in candidates.iter().flatten() {
+        // Primary XDG path.
+        if let Ok(path) = Self::config_path() {
+            candidates.push(path);
+        }
+        // Local project configuration.
+        candidates.push(std::path::PathBuf::from("openwebui-chat.toml"));
+        // HOME can differ between installation and runtime processes.
+        if let Ok(home) = std::env::var("HOME") {
+            candidates.push(
+                std::path::PathBuf::from(home)
+                    .join(".config")
+                    .join("openwebui-chat")
+                    .join("config.toml"),
+            );
+        }
+        // Common persistent configuration location for containerized installs.
+        candidates.push(std::path::PathBuf::from(
+            "/opt/data/.config/openwebui-chat/config.toml",
+        ));
+
+        for candidate in candidates {
             if candidate.exists() {
-                return Self::read_toml_config(candidate).map(Some);
+                return Self::read_toml_config(&candidate).map(Some);
             }
         }
 
@@ -201,6 +217,7 @@ impl Config {
             "/api/chat/completions",
             "/api/v1/chats",
             "/api/v1/chats/new",
+            // Used for both waiting on a chat (GET) and deleting a session (DELETE).
             "/api/v1/chats/{id}",
         ]
     }
@@ -211,11 +228,11 @@ mod tests {
     use super::Config;
     use std::sync::Mutex;
 
-    static XDG_CONFIG_HOME_LOCK: Mutex<()> = Mutex::new(());
+    static CONFIG_ENV_LOCK: Mutex<()> = Mutex::new(());
 
     #[test]
     fn save_to_xdg_writes_config_toml_to_the_xdg_directory() -> anyhow::Result<()> {
-        let _lock = XDG_CONFIG_HOME_LOCK.lock().unwrap();
+        let _lock = CONFIG_ENV_LOCK.lock().unwrap();
         let temp_dir =
             std::env::temp_dir().join(format!("openwebui-chat-test-{}", uuid::Uuid::new_v4()));
         let previous_xdg_config_home = std::env::var_os("XDG_CONFIG_HOME");
@@ -253,7 +270,7 @@ mod tests {
 
     #[test]
     fn load_xdg_uses_saved_values_without_environment_overrides() -> anyhow::Result<()> {
-        let _lock = XDG_CONFIG_HOME_LOCK.lock().unwrap();
+        let _lock = CONFIG_ENV_LOCK.lock().unwrap();
         let temp_dir =
             std::env::temp_dir().join(format!("openwebui-chat-test-{}", uuid::Uuid::new_v4()));
         let previous_xdg_config_home = std::env::var_os("XDG_CONFIG_HOME");
@@ -288,6 +305,53 @@ mod tests {
         match previous_base_url {
             Some(value) => std::env::set_var("OPENWEBUI_BASE_URL", value),
             None => std::env::remove_var("OPENWEBUI_BASE_URL"),
+        }
+        let _ = std::fs::remove_dir_all(&temp_dir);
+
+        result
+    }
+
+    #[test]
+    fn load_toml_uses_home_based_fallback_when_xdg_config_is_missing() -> anyhow::Result<()> {
+        let _lock = CONFIG_ENV_LOCK.lock().unwrap();
+        let temp_dir =
+            std::env::temp_dir().join(format!("openwebui-chat-test-{}", uuid::Uuid::new_v4()));
+        let xdg_config_home = temp_dir.join("xdg");
+        let home = temp_dir.join("home");
+        let cwd = temp_dir.join("cwd");
+        let home_config = home.join(".config/openwebui-chat/config.toml");
+        let previous_xdg_config_home = std::env::var_os("XDG_CONFIG_HOME");
+        let previous_home = std::env::var_os("HOME");
+        let previous_cwd = std::env::current_dir()?;
+
+        let result = (|| -> anyhow::Result<()> {
+            std::fs::create_dir_all(home_config.parent().expect("config path has a parent"))?;
+            std::fs::create_dir_all(&cwd)?;
+            std::fs::write(
+                &home_config,
+                "base_url = \"http://home-config.example.test:8080\"\napi_key = \"home-api-key\"\n",
+            )?;
+            std::env::set_var("XDG_CONFIG_HOME", &xdg_config_home);
+            std::env::set_var("HOME", &home);
+            std::env::set_current_dir(&cwd)?;
+
+            let config = Config::load_toml()?.expect("HOME fallback config should be loaded");
+            assert_eq!(
+                config.base_url.as_deref(),
+                Some("http://home-config.example.test:8080")
+            );
+            assert_eq!(config.api_key.as_deref(), Some("home-api-key"));
+            Ok(())
+        })();
+
+        std::env::set_current_dir(previous_cwd)?;
+        match previous_xdg_config_home {
+            Some(path) => std::env::set_var("XDG_CONFIG_HOME", path),
+            None => std::env::remove_var("XDG_CONFIG_HOME"),
+        }
+        match previous_home {
+            Some(path) => std::env::set_var("HOME", path),
+            None => std::env::remove_var("HOME"),
         }
         let _ = std::fs::remove_dir_all(&temp_dir);
 
