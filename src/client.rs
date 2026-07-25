@@ -21,6 +21,8 @@ pub struct WaitResult {
     pub status: String, // "completed" | "pending"
     #[serde(skip_serializing_if = "String::is_empty")]
     pub content: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub reasoning: Option<String>,
     pub chat_id: String,
     pub message_id: String,
 }
@@ -29,6 +31,8 @@ pub struct WaitResult {
 pub struct HistoryEntry {
     pub role: String,
     pub content: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub reasoning: Option<String>,
     pub done: bool,
     pub timestamp: u64,
 }
@@ -211,7 +215,8 @@ impl OpenWebUIClient {
                 .and_then(|role| role.as_str())
                 .unwrap_or("unknown")
                 .to_string();
-            let content = extract_message_content(message);
+            let content = extract_content(message);
+            let reasoning = extract_reasoning(message);
             let done = message
                 .get("done")
                 .and_then(|done| done.as_bool())
@@ -223,6 +228,7 @@ impl OpenWebUIClient {
             entries.push(HistoryEntry {
                 role,
                 content,
+                reasoning,
                 done,
                 timestamp,
             });
@@ -356,13 +362,14 @@ impl OpenWebUIClient {
                 return Ok(WaitResult {
                     status: "pending".to_string(),
                     content: String::new(),
+                    reasoning: None,
                     chat_id: chat_id.to_string(),
                     message_id: message_id.to_string(),
                 });
             }
 
             match self.fetch_message(chat_id, message_id).await {
-                Ok(Some((content, done))) => {
+                Ok(Some((content, reasoning, done))) => {
                     consecutive_failures = 0;
                     if done {
                         // Completion is terminal, so this invocation can notify only once.
@@ -372,6 +379,7 @@ impl OpenWebUIClient {
                         return Ok(WaitResult {
                             status: "completed".to_string(),
                             content,
+                            reasoning,
                             chat_id: chat_id.to_string(),
                             message_id: message_id.to_string(),
                         });
@@ -406,7 +414,7 @@ impl OpenWebUIClient {
         &self,
         chat_id: &str,
         message_id: &str,
-    ) -> Result<Option<(String, bool)>> {
+    ) -> Result<Option<(String, Option<String>, bool)>> {
         let url = format!("{}/api/v1/chats/{}", self.base_url, chat_id);
         let resp = self
             .client
@@ -435,16 +443,18 @@ impl OpenWebUIClient {
 
         match message {
             Some(msg) => {
-                let content = extract_message_content(msg);
+                let content = extract_content(msg);
+                let reasoning = extract_reasoning(msg);
                 let done = msg.get("done").and_then(|d| d.as_bool()).unwrap_or(false);
-                Ok(Some((content, done)))
+                Ok(Some((content, reasoning, done)))
             }
             None => Ok(None),
         }
     }
 }
 
-fn extract_message_content(message: &Value) -> String {
+/// Extract regular content text from legacy content or Open WebUI message output.
+fn extract_content(message: &Value) -> String {
     let content = message
         .get("content")
         .and_then(|content| content.as_str())
@@ -453,19 +463,35 @@ fn extract_message_content(message: &Value) -> String {
         return content.to_string();
     }
 
-    // Fall back to output[].content[].text (OpenWebUI 0.10.x format).
+    // Fall back to regular output[].content[].text items (OpenWebUI 0.10.x format).
+    extract_output_text(message, |item_type| {
+        item_type.is_empty() || item_type == "message"
+    })
+}
+
+/// Extract reasoning/thinking text from Open WebUI reasoning output.
+fn extract_reasoning(message: &Value) -> Option<String> {
+    let reasoning = extract_output_text(message, |item_type| item_type == "reasoning");
+    (!reasoning.is_empty()).then_some(reasoning)
+}
+
+fn extract_output_text(message: &Value, include_item_type: impl Fn(&str) -> bool) -> String {
     let Some(output) = message.get("output").and_then(|output| output.as_array()) else {
         return String::new();
     };
 
     let mut text = String::new();
     for item in output {
-        if let Some(entries) = item.get("content").and_then(|content| content.as_array()) {
+        let item_type = item.get("type").and_then(Value::as_str).unwrap_or("");
+        if !include_item_type(item_type) {
+            continue;
+        }
+        if let Some(entries) = item.get("content").and_then(Value::as_array) {
             for entry in entries {
                 if let Some(entry_text) = entry
                     .get("text")
-                    .and_then(|text| text.as_str())
-                    .or_else(|| entry.get("content").and_then(|content| content.as_str()))
+                    .and_then(Value::as_str)
+                    .or_else(|| entry.get("content").and_then(Value::as_str))
                 {
                     text.push_str(entry_text);
                 }
@@ -548,9 +574,44 @@ mod tests {
         server.await.expect("test server should complete");
     }
 
+    #[test]
+    fn extracts_content_and_reasoning_from_separate_output_items() {
+        let message = serde_json::json!({
+            "content": "",
+            "output": [
+                {"type": "reasoning", "content": [{"text": "Consider "}, {"content": "the prompt."}]},
+                {"type": "message", "content": [{"text": "Final "}, {"content": "answer."}]},
+                {"content": [{"text": "Untyped output."}]}
+            ]
+        });
+
+        assert_eq!(
+            super::extract_content(&message),
+            "Final answer.Untyped output."
+        );
+        assert_eq!(
+            super::extract_reasoning(&message),
+            Some("Consider the prompt.".to_string())
+        );
+    }
+
+    #[test]
+    fn extract_content_prefers_legacy_content_and_omits_reasoning() {
+        let message = serde_json::json!({
+            "content": "Legacy response",
+            "output": [{"type": "reasoning", "content": [{"text": "Hidden thought"}]}]
+        });
+
+        assert_eq!(super::extract_content(&message), "Legacy response");
+        assert_eq!(
+            super::extract_reasoning(&message),
+            Some("Hidden thought".to_string())
+        );
+    }
+
     #[tokio::test]
-    async fn fetch_history_returns_all_messages_and_extracts_fallback_output_text() {
-        let body = r#"{"title":"History test","chat":{"history":{"messages":{"assistant-direct":{"role":"assistant","content":"Direct content","done":true,"timestamp":100},"assistant-fallback":{"role":"assistant","content":"","done":true,"timestamp":200,"output":[{"content":[{"text":"Fallback "},{"content":"content"}]}]}}}}}"#;
+    async fn fetch_history_returns_all_messages_and_separates_reasoning_from_content() {
+        let body = r#"{"title":"History test","chat":{"history":{"messages":{"assistant-direct":{"role":"assistant","content":"Direct content","done":true,"timestamp":100},"assistant-fallback":{"role":"assistant","content":"","done":true,"timestamp":200,"output":[{"type":"reasoning","content":[{"text":"Reasoning"}]},{"type":"message","content":[{"text":"Fallback "},{"content":"content"}]}]}}}}}"#;
         let response = format!(
             "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
             body.len(),
@@ -572,6 +633,7 @@ mod tests {
         assert!(history.messages[0].done);
         assert_eq!(history.messages[0].timestamp, 100);
         assert_eq!(history.messages[1].content, "Fallback content");
+        assert_eq!(history.messages[1].reasoning, Some("Reasoning".to_string()));
         assert_eq!(history.messages[1].timestamp, 200);
 
         let request = server.await.expect("test server should complete");

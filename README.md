@@ -9,7 +9,7 @@ When an agent uses `openwebui-chat`, the conversation is stored as a native Open
 - **Persistent web-visible records** — every conversation appears at `/c/<chat_id>` in Open WebUI
 - **Auto-generated titles** — Open WebUI automatically names each chat session
 - **Human-readable history** — read back full conversations through the normal UI
-- **No duplicate transcript stores** — Open WebUI is the single source of truth
+- **Local history cache** — sent user messages and completed assistant replies are also appended as JSONL under `$XDG_DATA_HOME/openwebui-chat/sessions/`, enabling offline Markdown history
 
 ## Quick start
 
@@ -112,6 +112,27 @@ On timeout:
   "content": ""
 }
 ```
+
+### `history` — Read local or remote session history
+
+Reads the local append-only session file first (`$XDG_DATA_HOME/openwebui-chat/sessions/<chat_id>.jsonl`); if it does not exist, the command fetches the server history. Markdown is the default output and shows any extracted assistant reasoning in expandable details blocks. Pagination is counted from the end of the conversation.
+
+```bash
+# Last 10 messages as Markdown (default)
+openwebui-chat history --chat-id <ID>
+
+# Most recent message only
+openwebui-chat history --chat-id <ID> --page 1 --page-size 1
+
+# Full backward-compatible JSON shape
+openwebui-chat history --chat-id <ID> --format json
+```
+
+| Option | Default | Description |
+|--------|---------|-------------|
+| `--page` | `1` | Page counted from the end (`1` is the newest page) |
+| `--page-size` | `10` | Messages shown in Markdown per page |
+| `--format` | `markdown` | `markdown` or backward-compatible `json` |
 
 ### `doctor` — Diagnose connectivity
 

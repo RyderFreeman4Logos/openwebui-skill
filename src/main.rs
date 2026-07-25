@@ -1,6 +1,7 @@
 mod client;
 mod config;
 mod notify;
+mod session;
 
 use std::{io::Write, process::ExitCode};
 
@@ -74,11 +75,23 @@ enum Command {
         #[arg(long)]
         notify: Option<String>,
     },
-    /// Dump the full conversation history of a chat session
+    /// Display a chat session's history, preferring local storage
     History {
         /// Chat ID to read
         #[arg(long)]
         chat_id: String,
+
+        /// Page number from the end (1 = last page)
+        #[arg(long)]
+        page: Option<usize>,
+
+        /// Messages per page
+        #[arg(long)]
+        page_size: Option<usize>,
+
+        /// Output format: markdown (default) or json
+        #[arg(long, value_parser = ["markdown", "json"])]
+        format: Option<String>,
     },
     /// Delete a chat session
     DeleteSession {
@@ -154,6 +167,20 @@ async fn run(cli: Cli) -> Result<()> {
         return Ok(());
     }
 
+    if let Command::History {
+        chat_id,
+        page,
+        page_size,
+        format,
+    } = &cli.command
+    {
+        if let Some(messages) = session::read_session(chat_id)? {
+            let result = local_history_result(chat_id, messages);
+            print_history(&result, *page, *page_size, format.as_deref())?;
+            return Ok(());
+        }
+    }
+
     let cfg = config::Config::load(
         cli.base_url.as_deref(),
         cli.api_key.as_deref(),
@@ -172,6 +199,15 @@ async fn run(cli: Cli) -> Result<()> {
             let result = client
                 .submit_message(&message, &model, None, title.as_deref())
                 .await?;
+            session::append_message(
+                &result.chat_id,
+                &session::LocalMessage {
+                    role: "user".to_string(),
+                    content: message.clone(),
+                    reasoning: None,
+                    timestamp: current_unix_timestamp(),
+                },
+            )?;
             println!("{}", serde_json::to_string_pretty(&result)?);
         }
         Command::Send { chat_id, message } => {
@@ -179,6 +215,15 @@ async fn run(cli: Cli) -> Result<()> {
             let result = client
                 .submit_message(&message, &model, Some(&chat_id), None)
                 .await?;
+            session::append_message(
+                &result.chat_id,
+                &session::LocalMessage {
+                    role: "user".to_string(),
+                    content: message.clone(),
+                    reasoning: None,
+                    timestamp: current_unix_timestamp(),
+                },
+            )?;
             println!("{}", serde_json::to_string_pretty(&result)?);
         }
         Command::Wait {
@@ -197,11 +242,27 @@ async fn run(cli: Cli) -> Result<()> {
                     notify.as_deref(),
                 )
                 .await?;
+            if result.status == "completed" {
+                session::append_message(
+                    &result.chat_id,
+                    &session::LocalMessage {
+                        role: "assistant".to_string(),
+                        content: result.content.clone(),
+                        reasoning: result.reasoning.clone(),
+                        timestamp: current_unix_timestamp(),
+                    },
+                )?;
+            }
             println!("{}", serde_json::to_string_pretty(&result)?);
         }
-        Command::History { chat_id } => {
+        Command::History {
+            chat_id,
+            page,
+            page_size,
+            format,
+        } => {
             let result = client.fetch_history(&chat_id).await?;
-            println!("{}", serde_json::to_string_pretty(&result)?);
+            print_history(&result, page, page_size, format.as_deref())?;
         }
         Command::DeleteSession { chat_id } => {
             let deleted = client.delete_chat(&chat_id).await?;
@@ -238,6 +299,105 @@ async fn run(cli: Cli) -> Result<()> {
     }
 
     Ok(())
+}
+
+fn current_unix_timestamp() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs()
+}
+
+fn local_history_result(
+    chat_id: &str,
+    messages: Vec<session::LocalMessage>,
+) -> client::HistoryResult {
+    client::HistoryResult {
+        chat_id: chat_id.to_string(),
+        title: format!("Chat {chat_id}"),
+        messages: messages
+            .into_iter()
+            .map(|message| client::HistoryEntry {
+                role: message.role,
+                content: message.content,
+                reasoning: message.reasoning,
+                done: true,
+                timestamp: message.timestamp,
+            })
+            .collect(),
+    }
+}
+
+fn print_history(
+    result: &client::HistoryResult,
+    page: Option<usize>,
+    page_size: Option<usize>,
+    format: Option<&str>,
+) -> Result<()> {
+    match format.unwrap_or("markdown") {
+        "json" => println!("{}", serde_json::to_string_pretty(result)?),
+        "markdown" => print!(
+            "{}",
+            render_history_markdown(
+                &result.title,
+                &result.chat_id,
+                &result.messages,
+                page.unwrap_or(1),
+                page_size.unwrap_or(10),
+            )?
+        ),
+        unsupported => return Err(anyhow::anyhow!("Unsupported history format: {unsupported}")),
+    }
+    Ok(())
+}
+
+fn render_history_markdown(
+    title: &str,
+    chat_id: &str,
+    messages: &[client::HistoryEntry],
+    page: usize,
+    page_size: usize,
+) -> Result<String> {
+    if page == 0 {
+        return Err(anyhow::anyhow!("--page must be at least 1"));
+    }
+    if page_size == 0 {
+        return Err(anyhow::anyhow!("--page-size must be at least 1"));
+    }
+
+    let message_count = messages.len();
+    let total_pages = message_count / page_size + usize::from(message_count % page_size != 0);
+    let mut markdown = format!(
+        "# {title}\n\n> Session: {chat_id} | Page {page}/{total_pages} | {message_count} messages total\n\n---\n"
+    );
+
+    if page > total_pages {
+        markdown.push_str(&format!(
+            "\nPage {page} exceeds total pages ({total_pages}).\n"
+        ));
+        return Ok(markdown);
+    }
+
+    let end = message_count - (page - 1) * page_size;
+    let start = end.saturating_sub(page_size);
+    for (index, message) in messages[start..end].iter().enumerate() {
+        let heading = match message.role.as_str() {
+            "user" => "User",
+            "assistant" => "Assistant",
+            role => role,
+        };
+        markdown.push_str(&format!("\n## {heading}\n{}\n", message.content));
+        if let Some(reasoning) = &message.reasoning {
+            markdown.push_str(&format!(
+                "\n<details>\n<summary>Reasoning</summary>\n\n{reasoning}\n\n</details>\n"
+            ));
+        }
+        if index + 1 < end - start {
+            markdown.push_str("\n---\n");
+        }
+    }
+
+    Ok(markdown)
 }
 
 async fn run_config_init() -> Result<()> {
@@ -425,9 +585,71 @@ mod tests {
     }
 
     #[test]
-    fn history_is_a_valid_command() {
-        assert!(
-            Cli::try_parse_from(["openwebui-chat", "history", "--chat-id", "chat-123"]).is_ok()
+    fn history_accepts_pagination_and_format_options() {
+        assert!(Cli::try_parse_from([
+            "openwebui-chat",
+            "history",
+            "--chat-id",
+            "chat-123",
+            "--page",
+            "2",
+            "--page-size",
+            "5",
+            "--format",
+            "json",
+        ])
+        .is_ok());
+    }
+
+    #[test]
+    fn markdown_history_paginates_from_the_end_and_includes_reasoning() {
+        let messages = vec![
+            crate::client::HistoryEntry {
+                role: "user".to_string(),
+                content: "first".to_string(),
+                reasoning: None,
+                done: true,
+                timestamp: 1,
+            },
+            crate::client::HistoryEntry {
+                role: "assistant".to_string(),
+                content: "second".to_string(),
+                reasoning: Some("because".to_string()),
+                done: true,
+                timestamp: 2,
+            },
+            crate::client::HistoryEntry {
+                role: "user".to_string(),
+                content: "third".to_string(),
+                reasoning: None,
+                done: true,
+                timestamp: 3,
+            },
+        ];
+
+        let markdown = super::render_history_markdown("Thread", "chat-123", &messages, 1, 1)
+            .expect("valid pagination should render");
+
+        assert_eq!(
+            markdown,
+            "# Thread\n\n> Session: chat-123 | Page 1/3 | 3 messages total\n\n---\n\n## User\nthird\n"
+        );
+
+        let previous_page = super::render_history_markdown("Thread", "chat-123", &messages, 2, 1)
+            .expect("valid pagination should render");
+        assert!(previous_page.contains("## Assistant\nsecond"));
+        assert!(previous_page.contains("<summary>Reasoning</summary>\n\nbecause"));
+        assert!(!previous_page.contains("third"));
+    }
+
+    #[test]
+    fn markdown_history_reports_pages_beyond_available_messages() {
+        let markdown = super::render_history_markdown("Thread", "chat-123", &[], 2, 10)
+            .expect("valid pagination should render");
+
+        assert_eq!(
+            markdown,
+            "# Thread\n\n> Session: chat-123 | Page 2/0 | 0 messages total\n\n---\n\nPage 2 exceeds total pages (0).\n"
         );
     }
 }
