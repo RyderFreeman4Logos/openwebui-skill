@@ -328,8 +328,36 @@ impl OpenWebUIClient {
                 let content = msg
                     .get("content")
                     .and_then(|c| c.as_str())
-                    .unwrap_or("")
-                    .to_string();
+                    .filter(|content| !content.is_empty())
+                    .map(str::to_string)
+                    .unwrap_or_else(|| {
+                        msg.get("output")
+                            .and_then(|output| output.as_array())
+                            .map(|output| {
+                                let mut text = String::new();
+                                for item in output {
+                                    if let Some(entries) =
+                                        item.get("content").and_then(|content| content.as_array())
+                                    {
+                                        for entry in entries {
+                                            if let Some(entry_text) = entry
+                                                .get("text")
+                                                .and_then(|text| text.as_str())
+                                                .or_else(|| {
+                                                    entry
+                                                        .get("content")
+                                                        .and_then(|content| content.as_str())
+                                                })
+                                            {
+                                                text.push_str(entry_text);
+                                            }
+                                        }
+                                    }
+                                }
+                                text
+                            })
+                            .unwrap_or_default()
+                    });
                 let done = msg
                     .get("done")
                     .and_then(|d| d.as_bool())
