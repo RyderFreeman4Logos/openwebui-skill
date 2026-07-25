@@ -1,3 +1,8 @@
+---
+name: openwebui-chat
+description: Chat with Open WebUI models from the command line — creates persistent, web-visible chat records. Use when the agent needs to converse with a model hosted on Open WebUI via the openwebui-chat CLI.
+---
+
 # openwebui-chat
 
 Use when the agent needs to chat with a model hosted on Open WebUI, creating a persistent, web-visible chat record. This skill provides the workflow for `start` → `wait` → `send` operations via the `openwebui-chat` CLI.
