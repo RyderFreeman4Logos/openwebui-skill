@@ -74,6 +74,12 @@ enum Command {
         #[arg(long)]
         notify: Option<String>,
     },
+    /// Dump the full conversation history of a chat session
+    History {
+        /// Chat ID to read
+        #[arg(long)]
+        chat_id: String,
+    },
     /// Delete a chat session
     DeleteSession {
         /// Chat ID to delete
@@ -191,6 +197,10 @@ async fn run(cli: Cli) -> Result<()> {
                     notify.as_deref(),
                 )
                 .await?;
+            println!("{}", serde_json::to_string_pretty(&result)?);
+        }
+        Command::History { chat_id } => {
+            let result = client.fetch_history(&chat_id).await?;
             println!("{}", serde_json::to_string_pretty(&result)?);
         }
         Command::DeleteSession { chat_id } => {
@@ -412,5 +422,12 @@ mod tests {
             ["openwebui-chat", "delete-session", "--chat-id", "chat-123",]
         )
         .is_ok());
+    }
+
+    #[test]
+    fn history_is_a_valid_command() {
+        assert!(
+            Cli::try_parse_from(["openwebui-chat", "history", "--chat-id", "chat-123"]).is_ok()
+        );
     }
 }

@@ -25,6 +25,21 @@ pub struct WaitResult {
     pub message_id: String,
 }
 
+#[derive(Debug, Clone, Serialize)]
+pub struct HistoryEntry {
+    pub role: String,
+    pub content: String,
+    pub done: bool,
+    pub timestamp: u64,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct HistoryResult {
+    pub chat_id: String,
+    pub title: String,
+    pub messages: Vec<HistoryEntry>,
+}
+
 /// Maximum consecutive transient failures before giving up.
 const MAX_CONSECUTIVE_FAILURES: u32 = 5;
 
@@ -155,6 +170,69 @@ impl OpenWebUIClient {
             .await
             .context("Failed to parse delete response")?;
         Ok(body.as_bool().unwrap_or(false))
+    }
+
+    /// Fetch all messages from a chat session.
+    pub async fn fetch_history(&self, chat_id: &str) -> Result<HistoryResult> {
+        let url = format!("{}/api/v1/chats/{}", self.base_url, chat_id);
+        let resp = self
+            .client
+            .get(&url)
+            .bearer_auth(&self.api_key)
+            .send()
+            .await
+            .context("Failed to fetch chat")?;
+
+        if resp.status() == reqwest::StatusCode::NOT_FOUND {
+            return Err(anyhow!("Chat not found: {}", chat_id));
+        }
+        if !resp.status().is_success() {
+            return Err(anyhow!("HTTP {}", resp.status()));
+        }
+
+        let body: Value = resp.json().await.context("Failed to parse chat data")?;
+        let title = body
+            .get("title")
+            .and_then(|title| title.as_str())
+            .unwrap_or("")
+            .to_string();
+
+        let messages = body
+            .get("chat")
+            .and_then(|chat| chat.get("history"))
+            .and_then(|history| history.get("messages"))
+            .and_then(Value::as_object)
+            .ok_or_else(|| anyhow!("Could not find messages in chat data"))?;
+
+        let mut entries = Vec::with_capacity(messages.len());
+        for message in messages.values() {
+            let role = message
+                .get("role")
+                .and_then(|role| role.as_str())
+                .unwrap_or("unknown")
+                .to_string();
+            let content = extract_message_content(message);
+            let done = message
+                .get("done")
+                .and_then(|done| done.as_bool())
+                .unwrap_or(false);
+            let timestamp = message
+                .get("timestamp")
+                .and_then(|timestamp| timestamp.as_u64())
+                .unwrap_or(0);
+            entries.push(HistoryEntry {
+                role,
+                content,
+                done,
+                timestamp,
+            });
+        }
+
+        Ok(HistoryResult {
+            chat_id: chat_id.to_string(),
+            title,
+            messages: entries,
+        })
     }
 
     /// Submit a chat completion request to Open WebUI.
@@ -357,45 +435,44 @@ impl OpenWebUIClient {
 
         match message {
             Some(msg) => {
-                let content = msg
-                    .get("content")
-                    .and_then(|c| c.as_str())
-                    .filter(|content| !content.is_empty())
-                    .map(str::to_string)
-                    .unwrap_or_else(|| {
-                        msg.get("output")
-                            .and_then(|output| output.as_array())
-                            .map(|output| {
-                                let mut text = String::new();
-                                for item in output {
-                                    if let Some(entries) =
-                                        item.get("content").and_then(|content| content.as_array())
-                                    {
-                                        for entry in entries {
-                                            if let Some(entry_text) = entry
-                                                .get("text")
-                                                .and_then(|text| text.as_str())
-                                                .or_else(|| {
-                                                    entry
-                                                        .get("content")
-                                                        .and_then(|content| content.as_str())
-                                                })
-                                            {
-                                                text.push_str(entry_text);
-                                            }
-                                        }
-                                    }
-                                }
-                                text
-                            })
-                            .unwrap_or_default()
-                    });
+                let content = extract_message_content(msg);
                 let done = msg.get("done").and_then(|d| d.as_bool()).unwrap_or(false);
                 Ok(Some((content, done)))
             }
             None => Ok(None),
         }
     }
+}
+
+fn extract_message_content(message: &Value) -> String {
+    let content = message
+        .get("content")
+        .and_then(|content| content.as_str())
+        .unwrap_or("");
+    if !content.is_empty() {
+        return content.to_string();
+    }
+
+    // Fall back to output[].content[].text (OpenWebUI 0.10.x format).
+    let Some(output) = message.get("output").and_then(|output| output.as_array()) else {
+        return String::new();
+    };
+
+    let mut text = String::new();
+    for item in output {
+        if let Some(entries) = item.get("content").and_then(|content| content.as_array()) {
+            for entry in entries {
+                if let Some(entry_text) = entry
+                    .get("text")
+                    .and_then(|text| text.as_str())
+                    .or_else(|| entry.get("content").and_then(|content| content.as_str()))
+                {
+                    text.push_str(entry_text);
+                }
+            }
+        }
+    }
+    text
 }
 
 fn config_required_endpoints() -> String {
@@ -469,5 +546,36 @@ mod tests {
             .await
             .expect("404 should map to false"));
         server.await.expect("test server should complete");
+    }
+
+    #[tokio::test]
+    async fn fetch_history_returns_all_messages_and_extracts_fallback_output_text() {
+        let body = r#"{"title":"History test","chat":{"history":{"messages":{"assistant-direct":{"role":"assistant","content":"Direct content","done":true,"timestamp":100},"assistant-fallback":{"role":"assistant","content":"","done":true,"timestamp":200,"output":[{"content":[{"text":"Fallback "},{"content":"content"}]}]}}}}}"#;
+        let response = format!(
+            "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+            body.len(),
+            body
+        );
+        let (base_url, server) = serve_once(Box::leak(response.into_boxed_str())).await;
+        let client = OpenWebUIClient::new(reqwest::Client::new(), base_url, "api-key".to_string());
+
+        let history = client
+            .fetch_history("chat-123")
+            .await
+            .expect("history response should succeed");
+
+        assert_eq!(history.chat_id, "chat-123");
+        assert_eq!(history.title, "History test");
+        assert_eq!(history.messages.len(), 2);
+        assert_eq!(history.messages[0].role, "assistant");
+        assert_eq!(history.messages[0].content, "Direct content");
+        assert!(history.messages[0].done);
+        assert_eq!(history.messages[0].timestamp, 100);
+        assert_eq!(history.messages[1].content, "Fallback content");
+        assert_eq!(history.messages[1].timestamp, 200);
+
+        let request = server.await.expect("test server should complete");
+        assert!(request.starts_with("GET /api/v1/chats/chat-123 HTTP/1.1\r\n"));
+        assert!(request.contains("authorization: Bearer api-key"));
     }
 }
