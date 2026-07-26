@@ -42,6 +42,10 @@ enum Command {
         /// Chat title hint (Open WebUI will auto-generate a title if omitted)
         #[arg(long)]
         title: Option<String>,
+
+        /// Disable web search for this message, overriding the config setting
+        #[arg(long)]
+        no_web_search: bool,
     },
     /// Send a follow-up message to an existing chat
     Send {
@@ -52,6 +56,10 @@ enum Command {
         /// Message text to send
         #[arg(long)]
         message: String,
+
+        /// Disable web search for this message, overriding the config setting
+        #[arg(long)]
+        no_web_search: bool,
     },
     /// Wait for an assistant message to complete
     Wait {
@@ -194,10 +202,15 @@ async fn run(cli: Cli) -> Result<()> {
         client::OpenWebUIClient::new(http_client, cfg.base_url.clone(), cfg.api_key.clone());
 
     match cli.command {
-        Command::Start { message, title } => {
+        Command::Start {
+            message,
+            title,
+            no_web_search,
+        } => {
             let model = resolve_model(&cfg.default_model)?;
+            let web_search = resolve_web_search(cfg.web_search, no_web_search);
             let result = client
-                .submit_message(&message, &model, None, title.as_deref())
+                .submit_message(&message, &model, None, title.as_deref(), web_search)
                 .await?;
             session::append_message(
                 &result.chat_id,
@@ -210,10 +223,15 @@ async fn run(cli: Cli) -> Result<()> {
             )?;
             println!("{}", serde_json::to_string_pretty(&result)?);
         }
-        Command::Send { chat_id, message } => {
+        Command::Send {
+            chat_id,
+            message,
+            no_web_search,
+        } => {
             let model = resolve_model(&cfg.default_model)?;
+            let web_search = resolve_web_search(cfg.web_search, no_web_search);
             let result = client
-                .submit_message(&message, &model, Some(&chat_id), None)
+                .submit_message(&message, &model, Some(&chat_id), None, web_search)
                 .await?;
             session::append_message(
                 &result.chat_id,
@@ -434,6 +452,7 @@ async fn run_config_init() -> Result<()> {
         default_model,
         timeout: existing.timeout,
         poll_interval: existing.poll_interval,
+        web_search: existing.web_search,
     };
     let path = config::Config::config_path()?;
     config.save_to_xdg()?;
@@ -497,6 +516,10 @@ fn resolve_model(default_model: &str) -> Result<String> {
     }
 }
 
+fn resolve_web_search(config_web_search: bool, no_web_search: bool) -> bool {
+    config_web_search && !no_web_search
+}
+
 async fn run_doctor(client: &client::OpenWebUIClient, cfg: &config::Config) -> Result<()> {
     println!("openwebui-chat diagnostics");
     println!("==========================");
@@ -514,6 +537,7 @@ async fn run_doctor(client: &client::OpenWebUIClient, cfg: &config::Config) -> R
     );
     println!("  timeout:        {}s", cfg.timeout);
     println!("  poll_interval:  {}s", cfg.poll_interval);
+    println!("  web_search:     {}", cfg.web_search);
     println!();
 
     // Check connectivity
@@ -568,12 +592,41 @@ async fn run_doctor(client: &client::OpenWebUIClient, cfg: &config::Config) -> R
 
 #[cfg(test)]
 mod tests {
-    use super::Cli;
+    use super::{resolve_web_search, Cli};
     use clap::Parser;
 
     #[test]
     fn config_init_is_a_valid_command() {
         assert!(Cli::try_parse_from(["openwebui-chat", "config", "init"]).is_ok());
+    }
+
+    #[test]
+    fn start_and_send_accept_no_web_search_flag() {
+        assert!(Cli::try_parse_from([
+            "openwebui-chat",
+            "start",
+            "--message",
+            "Hello",
+            "--no-web-search",
+        ])
+        .is_ok());
+        assert!(Cli::try_parse_from([
+            "openwebui-chat",
+            "send",
+            "--chat-id",
+            "chat-123",
+            "--message",
+            "Hello again",
+            "--no-web-search",
+        ])
+        .is_ok());
+    }
+
+    #[test]
+    fn no_web_search_flag_overrides_configured_web_search_setting() {
+        assert!(resolve_web_search(true, false));
+        assert!(!resolve_web_search(true, true));
+        assert!(!resolve_web_search(false, false));
     }
 
     #[test]

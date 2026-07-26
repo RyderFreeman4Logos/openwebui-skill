@@ -6,3 +6,6 @@ base_url = "http://localhost:8080"
 api_key = "sk-your-api-key-here"
 default_model = ""
 timeout = 3300
+# Enable Open WebUI web search by default. `start` and `send` can disable it
+# for one request with --no-web-search.
+web_search = true

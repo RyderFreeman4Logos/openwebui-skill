@@ -94,5 +94,6 @@ openwebui-chat wait --chat-id "$cid" --message-id "$mid"
 - **Persistent records**: every conversation is stored as a native Open WebUI chat, visible at `/c/<chat_id>`.
 - **Auto-titles**: Open WebUI automatically generates a title for each chat session.
 - **Model selection**: use `--model <name>` to override the default model per invocation.
+- **Web search**: `web_search = true` is the default in the TOML configuration. Set it to `false` to disable it by default, or use `start --no-web-search` / `send --no-web-search` for one request.
 - **No duplicate transcript**: Open WebUI is the single source of truth — do not store transcripts separately.
 - **Diagnostics**: if you get HTTP 403, run `openwebui-chat doctor` — endpoint restrictions may need configuration.

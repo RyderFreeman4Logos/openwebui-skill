@@ -254,6 +254,7 @@ impl OpenWebUIClient {
         model: &str,
         chat_id: Option<&str>,
         _title: Option<&str>,
+        web_search: bool,
     ) -> Result<ChatResult> {
         let url = format!("{}/api/chat/completions", self.base_url);
 
@@ -276,6 +277,9 @@ impl OpenWebUIClient {
                 }
             ],
             "stream": true,
+            "features": {
+                "web_search": web_search,
+            },
             "id": assistant_message_id,
             "assistant_message_id": assistant_message_id,
             "session_id": session_id,
@@ -521,16 +525,46 @@ mod tests {
             let (mut stream, _) = listener.accept().await.expect("test server should accept");
             let mut request = Vec::new();
             let mut chunk = [0_u8; 1024];
-            loop {
+            let header_end = loop {
                 let read = stream
                     .read(&mut chunk)
                     .await
                     .expect("test server should read request");
                 assert_ne!(read, 0, "client closed connection before sending a request");
                 request.extend_from_slice(&chunk[..read]);
-                if request.windows(4).any(|window| window == b"\r\n\r\n") {
-                    break;
+                if let Some(header_end) = request
+                    .windows(4)
+                    .position(|window| window == b"\r\n\r\n")
+                    .map(|position| position + 4)
+                {
+                    break header_end;
                 }
+            };
+            let headers = std::str::from_utf8(&request[..header_end])
+                .expect("request headers should be UTF-8");
+            let content_length = headers
+                .lines()
+                .find_map(|line| {
+                    line.split_once(':').and_then(|(name, value)| {
+                        name.eq_ignore_ascii_case("content-length").then(|| {
+                            value
+                                .trim()
+                                .parse::<usize>()
+                                .expect("content length is valid")
+                        })
+                    })
+                })
+                .unwrap_or(0);
+            while request.len() < header_end + content_length {
+                let read = stream
+                    .read(&mut chunk)
+                    .await
+                    .expect("test server should read request body");
+                assert_ne!(
+                    read, 0,
+                    "client closed connection before sending the request body"
+                );
+                request.extend_from_slice(&chunk[..read]);
             }
             stream
                 .write_all(response.as_bytes())
@@ -572,6 +606,33 @@ mod tests {
             .await
             .expect("404 should map to false"));
         server.await.expect("test server should complete");
+    }
+
+    #[tokio::test]
+    async fn submit_message_sends_requested_web_search_feature() {
+        let body = r#"{"chat_id":"chat-123"}"#;
+        let response = format!(
+            "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+            body.len(),
+            body
+        );
+        let (base_url, server) = serve_once(Box::leak(response.into_boxed_str())).await;
+        let client = OpenWebUIClient::new(reqwest::Client::new(), base_url, "api-key".to_string());
+
+        let result = client
+            .submit_message("Hello", "test-model", None, None, false)
+            .await
+            .expect("chat submission should succeed");
+        assert_eq!(result.chat_id, "chat-123");
+
+        let request = server.await.expect("test server should complete");
+        assert!(request.starts_with("POST /api/chat/completions HTTP/1.1\r\n"));
+        let (_, request_body) = request
+            .split_once("\r\n\r\n")
+            .expect("request should include a body");
+        let payload: serde_json::Value =
+            serde_json::from_str(request_body).expect("request body should be JSON");
+        assert_eq!(payload["features"]["web_search"], false);
     }
 
     #[test]

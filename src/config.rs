@@ -3,6 +3,7 @@ use serde::{Deserialize, Serialize};
 
 const DEFAULT_TIMEOUT: u64 = 3300;
 const DEFAULT_POLL_INTERVAL: u64 = 3;
+const DEFAULT_WEB_SEARCH: bool = true;
 const DEFAULT_CONNECT_TIMEOUT: u64 = 10;
 const DEFAULT_REQUEST_TIMEOUT: u64 = 30;
 
@@ -16,6 +17,8 @@ pub struct Config {
     pub timeout: u64,
     #[serde(default = "default_poll_interval")]
     pub poll_interval: u64,
+    #[serde(default = "default_web_search")]
+    pub web_search: bool,
 }
 
 fn default_timeout() -> u64 {
@@ -26,6 +29,10 @@ fn default_poll_interval() -> u64 {
     DEFAULT_POLL_INTERVAL
 }
 
+fn default_web_search() -> bool {
+    DEFAULT_WEB_SEARCH
+}
+
 impl Default for Config {
     fn default() -> Self {
         Self {
@@ -34,6 +41,7 @@ impl Default for Config {
             default_model: String::new(),
             timeout: DEFAULT_TIMEOUT,
             poll_interval: DEFAULT_POLL_INTERVAL,
+            web_search: DEFAULT_WEB_SEARCH,
         }
     }
 }
@@ -45,6 +53,7 @@ struct TomlConfig {
     default_model: Option<String>,
     timeout: Option<u64>,
     poll_interval: Option<u64>,
+    web_search: Option<bool>,
 }
 
 impl Config {
@@ -85,6 +94,7 @@ impl Config {
             default_model: config.default_model.unwrap_or_default(),
             timeout: config.timeout.unwrap_or(DEFAULT_TIMEOUT),
             poll_interval: config.poll_interval.unwrap_or(DEFAULT_POLL_INTERVAL),
+            web_search: config.web_search.unwrap_or(DEFAULT_WEB_SEARCH),
         }))
     }
 
@@ -154,12 +164,18 @@ impl Config {
             .or(toml_cfg.as_ref().and_then(|c| c.poll_interval))
             .unwrap_or(DEFAULT_POLL_INTERVAL);
 
+        let web_search = toml_cfg
+            .as_ref()
+            .and_then(|c| c.web_search)
+            .unwrap_or(DEFAULT_WEB_SEARCH);
+
         Ok(Config {
             base_url,
             api_key,
             default_model,
             timeout,
             poll_interval,
+            web_search,
         })
     }
 
@@ -231,6 +247,20 @@ mod tests {
     static CONFIG_ENV_LOCK: Mutex<()> = Mutex::new(());
 
     #[test]
+    fn web_search_defaults_to_enabled_and_can_be_disabled_in_toml() -> anyhow::Result<()> {
+        let enabled: Config = toml::from_str(
+            "base_url = \"http://example.test:8080\"\napi_key = \"test-api-key\"\n",
+        )?;
+        assert!(enabled.web_search);
+
+        let disabled: Config = toml::from_str(
+            "base_url = \"http://example.test:8080\"\napi_key = \"test-api-key\"\nweb_search = false\n",
+        )?;
+        assert!(!disabled.web_search);
+        Ok(())
+    }
+
+    #[test]
     fn save_to_xdg_writes_config_toml_to_the_xdg_directory() -> anyhow::Result<()> {
         let _lock = CONFIG_ENV_LOCK.lock().unwrap();
         let temp_dir =
@@ -244,6 +274,7 @@ mod tests {
             default_model: "test-model".to_string(),
             timeout: 45,
             poll_interval: 2,
+            web_search: true,
         };
 
         let result = (|| -> anyhow::Result<()> {
@@ -256,6 +287,7 @@ mod tests {
             assert_eq!(saved["default_model"].as_str(), Some("test-model"));
             assert_eq!(saved["timeout"].as_integer(), Some(45));
             assert_eq!(saved["poll_interval"].as_integer(), Some(2));
+            assert_eq!(saved["web_search"].as_bool(), Some(true));
             Ok(())
         })();
 
@@ -283,6 +315,7 @@ mod tests {
             default_model: "saved-model".to_string(),
             timeout: 45,
             poll_interval: 2,
+            web_search: false,
         };
 
         let result = (|| -> anyhow::Result<()> {
@@ -295,6 +328,7 @@ mod tests {
             assert_eq!(loaded.default_model, config.default_model);
             assert_eq!(loaded.timeout, config.timeout);
             assert_eq!(loaded.poll_interval, config.poll_interval);
+            assert_eq!(loaded.web_search, config.web_search);
             Ok(())
         })();
 
