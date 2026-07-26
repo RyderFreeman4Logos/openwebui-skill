@@ -30,7 +30,7 @@ fi
 echo
 echo "[2/5] Installing openwebui-chat via mise cargo backend..."
 mise use -g rust@stable
-mise use -g "cargo:openwebui-chat@git+${REPOSITORY_URL}"
+mise use -g "cargo:https://${REPOSITORY_URL#https://}"
 
 if ! command -v openwebui-chat >/dev/null 2>&1; then
     echo "Error: openwebui-chat was not found after mise install." >&2
